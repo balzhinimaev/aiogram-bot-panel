@@ -52,9 +52,9 @@ async def main():
             bot=bot,
             http_session=None, # Сессию передадим позже
             api_settings=api_settings,
-            admin_id=bot_settings.admin_id
+            settings=settings
         )
-        logger.info("Scheduler initialized successfully.")
+        logger.info("Планировщик инициализирован.")
     except Exception as e:
         logger.exception("КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать планировщик!")
         # Можно раскомментировать exit, если бот не должен работать без планировщика

@@ -22,7 +22,7 @@ services:
     # НЕ копируем .env в образ
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-      - ADMIN_ID=${ADMIN_ID}
+      - ADMIN_IDS=${ADMIN_IDS}
       - BOT_PASSWORD=${BOT_PASSWORD}
       # удобно
       - API_BASE_URL=http://mock_api:8081

@@ -1,50 +1,54 @@
+# utils/scheduler.py
 import logging
 import json
 import os
-from typing import Dict, Optional
-from typing import Tuple
+from typing import Optional, Dict, Tuple, List, Any # Добавили нужные типы
+
 import aiohttp
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.memory import MemoryJobStore
-
 from apscheduler.triggers.cron import CronTrigger
-from config.settings import ApiConfig
+from config.settings import ApiConfig, Settings
 from utils import api_client
 from utils.status_tracker import update_last_status
 logger = logging.getLogger(__name__)
 
 SCHEDULE_FILE = "data/schedules.json"
+DATA_DIR = "data"
 
 async def scheduled_job_runner(
     bot: Bot,
     http_session: Optional[aiohttp.ClientSession],
     api_settings: ApiConfig,
-    admin_id: int,
+    settings: Settings,
     process_name: str
 ):
     """
     Выполняет запуск процесса парсинга/синхронизации по расписанию,
-    обновляет статус последнего запуска и уведомляет администратора.
+    обновляет статус последнего запуска и уведомляет всех администраторов.
     Эта функция вызывается планировщиком APScheduler.
     """
     logger.info(f"[Планировщик] Запуск задачи для процесса: '{process_name}'")
 
-    # Проверяем наличие HTTP сессии
+    admin_ids = settings.bot.admin_ids
+    if not admin_ids:
+        logger.error("[Планировщик] Список ID администраторов пуст! Уведомления не будут отправлены.")
+        # return
+
+    # Проверяем наличие и состояние HTTP сессии
     if http_session is None or http_session.closed:
          logger.error(f"[Планировщик] HTTP сессия закрыта или отсутствует для задачи '{process_name}'. Невозможно выполнить API запросы.")
          success = False
          result_message = "Критическая ошибка: HTTP сессия недоступна для выполнения задачи."
          # Обновляем статус с информацией об ошибке сессии
-         try:
-             update_last_status(process_name, success, result_message)
-             logger.info(f"[Планировщик] Статус последнего запуска для '{process_name}' обновлен (Ошибка сессии).")
-         except Exception as status_e:
-             logger.exception(f"[Планировщик] Ошибка обновления статуса при ошибке сессии для '{process_name}'")
-         # Отправляем уведомление об ошибке сессии
+         try: update_last_status(process_name, success, result_message)
+         except Exception as status_e: logger.exception(f"[Планировщик] Ошибка обновления статуса при ошибке сессии для '{process_name}'")
+         # Отправляем уведомление об ошибке сессии всем админам
          notification_text = f"❌ [Расписание] Ошибка запуска '{process_name}':\n\n{result_message}"
-         try: await bot.send_message(admin_id, notification_text, disable_notification=False)
-         except Exception as e: logger.error(f"[Планировщик] Не удалось отправить уведомление об ошибке сессии админу {admin_id}: {e}")
+         for admin_id in admin_ids: # Цикл по списку админов
+             try: await bot.send_message(admin_id, notification_text, disable_notification=False)
+             except Exception as e: logger.error(f"[Планировщик] Не удалось отправить уведомление об ошибке сессии админу {admin_id}: {e}")
          return # Прерываем выполнение задачи
 
     # Если сессия есть, выполняем API вызовы
@@ -81,7 +85,7 @@ async def scheduled_job_runner(
         logger.exception(f"[Планировщик] Ошибка обновления статуса последнего запуска для '{process_name}'")
     # -----------------------------------------
 
-    # --- Формируем и отправляем уведомление администратору ---
+    # --- Формируем и отправляем уведомление администраторам ---
     status_emoji = "✅" if success else "❌"
     # Формируем базовое сообщение
     notification_text = f"{status_emoji} [Расписание] Процесс '{process_name}' завершен."
@@ -94,175 +98,132 @@ async def scheduled_job_runner(
          details = result_message[:max_len] + ('...' if len(result_message) > max_len else '')
          notification_text += f"\n\nДетали:\n{details}"
 
-    logger.info(f"[Планировщик] Результат задачи '{process_name}': {'Успех' if success else 'Ошибка'}. Отправка уведомления админу {admin_id}.")
+    logger.info(f"[Планировщик] Результат задачи '{process_name}': {'Успех' if success else 'Ошибка'}. Отправка уведомлений админам: {admin_ids}.")
 
-    try:
-        await bot.send_message(admin_id, notification_text, disable_notification=False)
-        logger.info(f"[Планировщик] Уведомление для задачи '{process_name}' успешно отправлено админу {admin_id}.")
-    except Exception as e:
-        logger.error(f"[Планировщик] Не удалось отправить уведомление админу {admin_id} для задачи '{process_name}': {e}")
+    # Отправляем уведомление ВСЕМ админам из списка
+    for admin_id in admin_ids: # Цикл по списку админов
+        try:
+            await bot.send_message(admin_id, notification_text, disable_notification=False)
+            logger.debug(f"[Планировщик] Уведомление для задачи '{process_name}' отправлено админу {admin_id}.")
+        except Exception as e:
+            # Логируем ошибку отправки конкретному админу, но продолжаем для остальных
+            logger.error(f"[Планировщик] Не удалось отправить уведомление админу {admin_id} для задачи '{process_name}': {e}")
 
-# --- Функции сохранения/загрузки расписания ---
 def _ensure_data_dir():
     """Создает папку 'data', если она не существует."""
-    if not os.path.exists("data"):
+    if not os.path.exists(DATA_DIR):
         try:
-            os.makedirs("data")
-            logging.info("Created 'data' directory for schedule persistence.")
+            os.makedirs(DATA_DIR)
+            logger.info(f"Создана директория '{DATA_DIR}' для сохранения данных.")
         except OSError as e:
-            logging.error(f"Failed to create 'data' directory: {e}")
+            logger.error(f"Не удалось создать директорию '{DATA_DIR}': {e}")
 
-SCHEDULE_FILE = "data/schedules.json"
 def save_schedules(scheduler: AsyncIOScheduler, update_info: Optional[Dict[str, Optional[str]]] = None):
     """
     Сохраняет текущие активные расписания в JSON файл.
     Принимает словарь `update_info` с последним изменением для повышения надежности.
-
-    Args:
-        scheduler: Экземпляр AsyncIOScheduler (технически не используется в этой версии,
-                   но оставлен для совместимости интерфейса, если понадобится сверка).
-        update_info: Словарь вида {'job_id': 'ЧЧ:ММ' или None}. None означает удаление.
-                     Если None, функция попытается прочитать текущий файл.
     """
     _ensure_data_dir()
     schedules_data: Dict[str, str] = {}
-
-    # Шаг 1: Загружаем существующие данные из файла, если он есть
+    # Шаг 1: Загружаем существующие данные
     if os.path.exists(SCHEDULE_FILE):
         try:
-            with open(SCHEDULE_FILE, 'r', encoding='utf-8') as f:
-                schedules_data = json.load(f)
+            with open(SCHEDULE_FILE, 'r', encoding='utf-8') as f: schedules_data = json.load(f)
             if not isinstance(schedules_data, dict):
-                logging.error(f"Invalid format in {SCHEDULE_FILE}. Expected a dictionary, got {type(schedules_data)}. Starting fresh.")
+                logger.error(f"Неверный формат в {SCHEDULE_FILE}, начинаем заново.")
                 schedules_data = {}
-            else:
-                logging.info(f"Loaded {len(schedules_data)} existing schedule(s) from {SCHEDULE_FILE}")
-        except (json.JSONDecodeError, IOError, FileNotFoundError) as e:
-            logging.exception(f"Failed to load or parse existing schedule file {SCHEDULE_FILE}. Starting fresh.")
+            else: logger.info(f"Загружено {len(schedules_data)} существующих расписаний из {SCHEDULE_FILE}")
+        except Exception as e:
+            logger.exception(f"Не удалось загрузить или прочитать {SCHEDULE_FILE}, начинаем заново.")
             schedules_data = {}
-    else:
-        logging.info(f"Schedule file {SCHEDULE_FILE} not found. Starting fresh.")
+    else: logger.info(f"Файл {SCHEDULE_FILE} не найден, начинаем заново.")
 
-    # Шаг 2: Применяем информацию о последнем изменении, если она передана
+    # Шаг 2: Применяем информацию о последнем изменении
     if update_info is not None:
-        logging.warning(f"!!! Applying update info to schedules: {update_info}")
+        logger.info(f"Применение информации об обновлении расписания: {update_info}")
         for job_id, time_str in update_info.items():
-            if not job_id.startswith("schedule_"):
-                 logging.warning(f"Skipping update for invalid job_id format: {job_id}")
-                 continue
-
+            if not job_id.startswith("schedule_"): continue
             if time_str is None:
-                if job_id in schedules_data:
-                    del schedules_data[job_id]
-                    logging.info(f"Removed '{job_id}' from schedule data based on update_info.")
-                else:
-                    logging.info(f"Job '{job_id}' was already absent from schedule data (requested removal).")
-            else:
-                schedules_data[job_id] = time_str
-                logging.info(f"Updated/Added '{job_id}' with time '{time_str}' in schedule data based on update_info.")
-    else:
-         logging.warning("!!! No update_info provided to save_schedules. Saving currently loaded data.")
+                if job_id in schedules_data: del schedules_data[job_id]; logger.info(f"Удалено расписание '{job_id}' из данных.")
+                else: logger.info(f"Расписание '{job_id}' уже отсутствовало (запрошено удаление).")
+            else: schedules_data[job_id] = time_str; logger.info(f"Обновлено/добавлено расписание '{job_id}': {time_str}.")
+    else: logger.warning("Информация об обновлении не передана в save_schedules.")
 
-
-    # Шаг 3: Записываем итоговый словарь schedules_data обратно в файл
+    # Шаг 3: Записываем итоговый словарь
     try:
-        logging.warning(f"!!! Final schedule data to save: {schedules_data}")
+        logger.info(f"Итоговые данные для сохранения: {schedules_data}")
         with open(SCHEDULE_FILE, 'w', encoding='utf-8') as f:
             json.dump(schedules_data, f, indent=4, ensure_ascii=False)
-        logging.info(f"Successfully saved {len(schedules_data)} schedule(s) to {SCHEDULE_FILE}")
-    except IOError as e:
-        logging.exception(f"!!! IOError: FAILED TO SAVE SCHEDULES to {SCHEDULE_FILE} !!!")
-    except TypeError as e:
-         logging.exception(f"!!! TypeError: FAILED TO SAVE SCHEDULES due to JSON serialization error !!! Data: {schedules_data}")
+        logger.info(f"Успешно сохранено {len(schedules_data)} расписаний в {SCHEDULE_FILE}")
     except Exception as e:
-        logging.exception(f"!!! UNEXPECTED ERROR: FAILED TO SAVE SCHEDULES to {SCHEDULE_FILE} !!!")
-        
+        logger.exception(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Не удалось сохранить расписания в {SCHEDULE_FILE} !!!")
+
+
 def load_schedules(
     scheduler: AsyncIOScheduler,
     bot: Bot,
-    http_session: aiohttp.ClientSession,
+    http_session: Optional[aiohttp.ClientSession], # Сессия может быть None при инициализации
     api_settings: ApiConfig,
-    admin_id: int
+    settings: Settings # Передаем весь объект настроек
 ) -> Dict[str, str]:
     """Загружает расписания из JSON файла и добавляет их в планировщик."""
     _ensure_data_dir()
-    loaded_schedules = {}
+    loaded_schedules: Dict[str, str] = {}
     if not os.path.exists(SCHEDULE_FILE):
-        logging.warning(f"Schedule file {SCHEDULE_FILE} not found. No schedules loaded.")
+        logger.warning(f"Файл {SCHEDULE_FILE} не найден. Расписания не загружены.")
         return loaded_schedules
-
     try:
-        with open(SCHEDULE_FILE, 'r', encoding='utf-8') as f:
-            schedules_data = json.load(f)
-
+        with open(SCHEDULE_FILE, 'r', encoding='utf-8') as f: schedules_data = json.load(f)
         if not isinstance(schedules_data, dict):
-             logging.error(f"Invalid format in {SCHEDULE_FILE}. Expected a dictionary.")
-             return loaded_schedules
+            logger.error(f"Неверный формат в {SCHEDULE_FILE}. Ожидался словарь.")
+            return loaded_schedules
 
         count = 0
         for job_id, time_str in schedules_data.items():
             try:
-                hour, minute = map(int, time_str.split(':'))
+                if not job_id.startswith("schedule_"): continue
                 process_name = job_id.split('_')[-1]
-                if process_name not in ["Sale", "CurrencyInfo", "PackageIdPrice"]:
-                     logging.warning(f"Skipping job with invalid ID format: {job_id}")
-                     continue
+                if process_name not in ["Sale", "CurrencyInfo", "PackageIdPrice"]: continue
+                hour, minute = map(int, time_str.split(':'))
+
+                # Формируем kwargs для передачи в scheduled_job_runner
+                job_kwargs = {
+                    "bot": bot,
+                    "http_session": http_session, # Передаем сессию (может быть None)
+                    "api_settings": api_settings,
+                    "settings": settings, # Передаем весь объект settings
+                    "process_name": process_name
+                }
+                if http_session is None:
+                    logger.warning(f"HTTP сессия не доступна при загрузке задачи '{job_id}', она может не выполниться корректно до передачи сессии.")
+                    job_kwargs["http_session"] = None # Явно
 
                 scheduler.add_job(
-                    scheduled_job_runner,
-                    trigger='cron',
-                    hour=hour,
-                    minute=minute,
-                    id=job_id,
-                    replace_existing=True,
-                    kwargs={
-                        "bot": bot,
-                        "http_session": http_session,
-                        "api_settings": api_settings,
-                        "admin_id": admin_id,
-                        "process_name": process_name
-                    }
+                    scheduled_job_runner, trigger='cron', hour=hour, minute=minute,
+                    id=job_id, replace_existing=True, kwargs=job_kwargs
                 )
-                loaded_schedules[job_id] = time_str # Сохраняем загруженное время
+                loaded_schedules[job_id] = time_str
                 count += 1
-                logging.info(f"Loaded and scheduled job '{job_id}' for {time_str}")
-            except (ValueError, KeyError, TypeError) as e:
-                logging.error(f"Failed to load job '{job_id}' with time '{time_str}': {e}")
-
-        logging.info(f"Successfully loaded {count} schedules from {SCHEDULE_FILE}")
+                logger.info(f"Загружено и добавлено расписание '{job_id}' на {time_str}")
+            except Exception as e:
+                logger.error(f"Ошибка загрузки задачи '{job_id}' ({time_str}): {e}", exc_info=True)
+        logger.info(f"Успешно загружено {count} расписаний из {SCHEDULE_FILE}")
         return loaded_schedules
-    except (json.JSONDecodeError, IOError) as e:
-        logging.exception(f"Failed to load schedules from {SCHEDULE_FILE}")
+    except Exception as e:
+        logger.exception(f"Не удалось загрузить расписания из {SCHEDULE_FILE}")
         return loaded_schedules
 
 
-# --- Функция инициализации планировщика ---
 async def setup_scheduler(
     bot: Bot,
-    http_session: aiohttp.ClientSession,
+    http_session: Optional[aiohttp.ClientSession], # Сессия может быть None
     api_settings: ApiConfig,
-    admin_id: int
+    settings: Settings # Принимаем settings
 ) -> Tuple[AsyncIOScheduler, Dict[str, str]]:
     """Инициализирует, настраивает и загружает задачи для планировщика."""
-    logging.info("Initializing scheduler...")
-    # JSON файл для сохранения/загрузки.
-    jobstores = {
-        'default': MemoryJobStore()
-    }
-    executors = {
-        'default': {'type': 'threadpool', 'max_workers': 5}
-    }
-    job_defaults = {
-        'coalesce': True,
-        'max_instances': 1
-    }
-    scheduler = AsyncIOScheduler(
-        jobstores=jobstores,
-        job_defaults=job_defaults,
-        timezone='Europe/Moscow'
-    )
-
-    current_schedules = load_schedules(scheduler, bot, http_session, api_settings, admin_id)
-
-    logging.info("Scheduler configured.")
+    logger.info("Инициализация планировщика...")
+    scheduler = AsyncIOScheduler(timezone='Europe/Moscow') # Укажите ваш часовой пояс!
+    # Передаем settings в load_schedules
+    current_schedules = load_schedules(scheduler, bot, http_session, api_settings, settings)
+    logger.info("Планировщик настроен.")
     return scheduler, current_schedules

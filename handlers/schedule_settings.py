@@ -168,7 +168,7 @@ async def process_schedule_time_input(
                     "bot": bot,
                     "http_session": http_session,
                     "api_settings": settings.api,       # Настройки API
-                    "admin_id": settings.bot.admin_id,  # ID админа для уведомлений
+                    "settings": settings,  # ID админа для уведомлений
                     "process_name": process_name        # Имя процесса для запуска
                 }
             )
