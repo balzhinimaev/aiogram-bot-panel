@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  mock_api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: mock_api_server
+    ports:
+      - "8081:8081"
+    expose:
+      - 8081
+    networks:
+      - bot_network
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: my_parser_bot
+    restart: unless-stopped
+    # НЕ копируем .env в образ
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_ID=${ADMIN_ID}
+      - BOT_PASSWORD=${BOT_PASSWORD}
+      # удобно
+      - API_BASE_URL=http://mock_api:8081
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - mock_api
+    networks:
+      - bot_network
+
+networks:
+  bot_network:
+    driver: bridge

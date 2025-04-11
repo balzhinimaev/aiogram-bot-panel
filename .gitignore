@@ -1,0 +1,22 @@
+# .gitignore
+
+# Virtual Environment
+venv/
+*/venv/
+.venv/
+*/.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+*.env
+
+# IDE files (add your IDE specific files if needed)
+.idea/
+.vscode/
+
+node_modules/
