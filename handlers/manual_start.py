@@ -1,15 +1,14 @@
 import logging
 import aiohttp
+import asyncio
 
 from aiogram import Router, F, types
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 
 from keyboards.inline import get_manual_start_keyboard, get_main_menu_keyboard
-
 from states.user_states import UserState
 from handlers.auth import AdminFilter
-
 from utils import api_client
 from config.settings import ApiConfig
 from utils.status_tracker import update_last_status
@@ -17,138 +16,145 @@ from utils.status_tracker import update_last_status
 logger = logging.getLogger(__name__)
 manual_start_router = Router()
 
+PARSER_EXECUTION_LOCK = asyncio.Lock()
+
 manual_start_router.message.filter(AdminFilter(), StateFilter(UserState.authorized))
 manual_start_router.callback_query.filter(AdminFilter(), StateFilter(UserState.authorized))
 
-# Обработчик нажатия кнопки "Запуск парсеров вручную" из главного меню
 @manual_start_router.callback_query(F.data == "manual_start")
 async def show_manual_start_menu(callback_query: types.CallbackQuery):
-    """
-    Отображает подменю с кнопками для ручного запуска парсеров.
-    """
     user_id = callback_query.from_user.id
-    logger.info(f"Администратор {user_id} открыл меню ручного запуска.")
+    logger.info(f"Admin {user_id} opened manual start menu.")
     try:
-        await callback_query.message.edit_text(
-            "Выберите процесс для ручного запуска:",
-            reply_markup=get_manual_start_keyboard() # Показываем клавиатуру выбора
-        )
+        if PARSER_EXECUTION_LOCK.locked():
+            await callback_query.message.edit_text(
+                "⏳ В данный момент выполняется другой процесс. Меню ручного запуска временно недоступно.\n\nПожалуйста, подождите...",
+                reply_markup=None
+            )
+            await callback_query.answer("Выполняется другой процесс, подождите.", show_alert=True)
+        else:
+            await callback_query.message.edit_text(
+                "Выберите процесс для ручного запуска:",
+                reply_markup=get_manual_start_keyboard()
+            )
+            await callback_query.answer()
     except Exception as e:
-        logger.error(f"Ошибка редактирования сообщения для меню ручного запуска (user {user_id}): {e}")
-        await callback_query.answer("Не удалось обновить меню.", show_alert=True)
-        return
-    await callback_query.answer()
+        logger.error(f"Error editing message for manual start menu (user {user_id}): {e}")
+        await callback_query.answer("Failed to update menu.", show_alert=True)
 
-# Обработчик нажатия кнопки "Назад" в меню ручного запуска
 @manual_start_router.callback_query(F.data == "main_menu")
-async def back_to_main_menu(callback_query: types.CallbackQuery, state: FSMContext): # Добавили state
-    """
-    Возвращает пользователя в главное меню из подменю ручного запуска.
-    """
+async def back_to_main_menu(callback_query: types.CallbackQuery, state: FSMContext):
     user_id = callback_query.from_user.id
-    logger.info(f"Администратор {user_id} вернулся в главное меню из ручного запуска.")
+    logger.info(f"Admin {user_id} returned to main menu from manual start.")
     try:
-        await callback_query.message.edit_text(
-            "Главное меню:",
-            reply_markup=get_main_menu_keyboard()
-        )
+        if PARSER_EXECUTION_LOCK.locked():
+             await callback_query.message.edit_text(
+                "Главное меню:\n\n_(Внимание: в данный момент выполняется процесс ручного запуска)_",
+                reply_markup=get_main_menu_keyboard()
+            )
+        else:
+             await callback_query.message.edit_text(
+                "Главное меню:",
+                reply_markup=get_main_menu_keyboard()
+            )
         await state.set_state(UserState.authorized)
     except Exception as e:
-        logger.error(f"Ошибка редактирования сообщения для главного меню (user {user_id}): {e}")
-        await callback_query.answer("Не удалось вернуться в главное меню.", show_alert=True)
-        return
+        logger.error(f"Error editing message for main menu (user {user_id}): {e}")
+        await callback_query.answer("Failed to return to main menu.", show_alert=True)
     await callback_query.answer()
 
-
-# Обработчик нажатия кнопок запуска конкретных процессов
 @manual_start_router.callback_query(F.data.startswith("run_parser:"))
 async def handle_run_parser(
     callback_query: types.CallbackQuery,
     http_session: aiohttp.ClientSession,
     api_settings: ApiConfig
 ):
-    """
-    Запускает выбранный процесс парсинга/синхронизации через API-клиент.
-    Показывает статус выполнения, результат пользователю и обновляет статус последнего запуска.
-    """
     try:
-        process_name = callback_query.data.split(":")[-1]
-        if not process_name: # Проверка на пустую строку после двоеточия
-             raise IndexError("Имя процесса пустое")
+        process_name = callback_query.data.split(":", 1)[-1]
+        if not process_name:
+             raise IndexError("Process name is empty")
     except IndexError:
-        logger.error(f"Неверный формат callback_data для запуска парсера: {callback_query.data}")
-        await callback_query.answer("Ошибка: Некорректные данные кнопки.", show_alert=True)
+        logger.error(f"Invalid callback_data format: {callback_query.data}")
+        await callback_query.answer("Error: Invalid button data.", show_alert=True)
         return
 
     user_id = callback_query.from_user.id
-    logger.info(f"Администратор {user_id} запросил ручной запуск процесса '{process_name}'.")
+    logger.info(f"Admin {user_id} requested manual start for '{process_name}'. Attempting to acquire lock...")
 
-    # 1. Отправляем предварительное сообщение пользователю
-    try:
-        await callback_query.message.edit_text(
-            f"⏳ Запускаю процесс '{process_name}'... Пожалуйста, подождите.",
-            reply_markup=None  # Убираем клавиатуру на время выполнения
-        )
-        await callback_query.answer(f"Запуск '{process_name}'...")
-    except Exception as e:
-        logger.error(f"Ошибка редактирования сообщения перед запуском '{process_name}' (user {user_id}): {e}")
+    if PARSER_EXECUTION_LOCK.locked():
+        logger.warning(f"'{process_name}' start for {user_id} delayed: lock is busy.")
+        await callback_query.answer(f"Another process is running. Your request '{process_name}' is queued.", show_alert=True)
 
-    # 2. Выполняем сам процесс через API
-    success = False
-    result_message = "Произошла неизвестная ошибка при обращении к API."
+    async with PARSER_EXECUTION_LOCK:
+        logger.info(f"Admin {user_id} acquired lock for '{process_name}'.")
 
-    try:
-        if process_name == "Sale":
-            success, result_message = await api_client.run_sale_process(http_session, api_settings)
-        elif process_name == "CurrencyInfo":
-            success, result_message = await api_client.run_currency_info_process(http_session, api_settings)
-        elif process_name == "PackageIdPrice":
-            success, result_message = await api_client.run_package_id_price_process(http_session, api_settings)
-        else:
-            logger.error(f"Получено неизвестное имя процесса '{process_name}' от {user_id}")
-            result_message = f"Ошибка: Неизвестный тип процесса '{process_name}'."
+        try:
+            await callback_query.message.edit_text(
+                f"⏳ Выполняю процесс '{process_name}'... Пожалуйста, подождите.\n\n(Другие запуски временно невозможны)",
+                reply_markup=None
+            )
+            await callback_query.answer(f"Starting '{process_name}'...")
+        except Exception as e:
+            logger.warning(f"Failed to edit message before starting '{process_name}' (user {user_id}): {e}")
+
+        success = False
+        api_status_code = None
+        result_message = "Unknown error occurred when calling the API client."
+
+        try:
+            if process_name == "Sale":
+                success, result_message, api_status_code = await api_client.run_sale_process(http_session, api_settings)
+            elif process_name == "CurrencyInfo":
+                success, result_message, api_status_code = await api_client.run_currency_info_process(http_session, api_settings)
+            elif process_name == "PackageIdPrice":
+                success, result_message, api_status_code = await api_client.run_package_id_price_process(http_session, api_settings)
+            else:
+                logger.error(f"Unknown process name '{process_name}' requested by {user_id}")
+                result_message = f"Error: Unknown process type '{process_name}'."
+                success = False
+
+        except Exception as e:
+            logger.exception(f"Critical error during API client call for '{process_name}' (user {user_id}): {e}")
+            result_message = f"Critical error during '{process_name}' execution. See server logs."
             success = False
 
-    except Exception as e:
-        logger.exception(f"Критическая ошибка при выполнении процесса '{process_name}' для {user_id}")
-        result_message = f"Критическая ошибка при запуске '{process_name}'. Подробности в логах сервера."
-        success = False
-
-    try:
-        update_last_status(process_name, success, result_message)
-        logger.info(f"Статус последнего запуска для '{process_name}' обновлен (Успех: {success}).")
-    except Exception as status_e:
-        logger.exception(f"Ошибка обновления статуса последнего запуска для '{process_name}'")
-
-    # 3. Формируем и отправляем итоговое сообщение пользователю
-    final_text = ""
-    if success:
-        # Если API клиент вернул success=True
-        final_text = f"✅ Процесс '{process_name}' успешно завершен.\n\n{result_message}"
-        logger.info(f"Ручной запуск '{process_name}' завершен успешно для {user_id}.")
-    else:
-        # Если API клиент вернул success=False или произошла ошибка выше
-        # В result_message уже должно быть сообщение об ошибке
-        final_text = f"❌ Ошибка при выполнении процесса '{process_name}'.\n\n{result_message}"
-        logger.error(f"Ручной запуск '{process_name}' завершился ошибкой для {user_id}. Причина: {result_message}")
-
-    # 4. Пытаемся обновить исходное сообщение результатом и вернуть клавиатуру
-    try:
-        await callback_query.message.edit_text(
-            final_text,
-            reply_markup=get_manual_start_keyboard() # Снова показываем клавиатуру выбора процесса
-        )
-    except Exception as e:
-        logger.error(f"Ошибка редактирования сообщения после завершения '{process_name}' (user {user_id}): {e}")
-        # Если редактирование не удалось (например, сообщение слишком старое),
-        # отправляем результат новым сообщением.
         try:
-            await callback_query.message.answer(
+            update_last_status(process_name, success, result_message)
+            logger.info(f"Last run status for '{process_name}' updated (API Success: {success}).")
+        except Exception as status_e:
+            logger.exception(f"Error updating last run status for '{process_name}': {status_e}")
+
+        final_text = ""
+        status_emoji = "✅" if success else "❌"
+        status_text = "успешно завершен" if success else "завершен с ошибкой"
+
+        final_text = f"{status_emoji} Процесс '{process_name}' {status_text}.\n\n"
+        final_text += result_message
+        if not success and api_status_code:
+            final_text += f"\n(Код ответа последнего шага: {api_status_code})"
+
+        if success:
+             logger.info(f"Manual run '{process_name}' (user {user_id}) completed successfully (API OK).")
+        else:
+             logger.error(f"Manual run '{process_name}' (user {user_id}) failed. API Success: {success}. Status: {api_status_code}. Message: {result_message}")
+
+        try:
+            await callback_query.message.edit_text(
                 final_text,
                 reply_markup=get_manual_start_keyboard()
             )
-        except Exception as e2:
-            # Если и новое сообщение отправить не удалось
-            logger.error(f"Не удалось отправить новое сообщение после завершения '{process_name}' (user {user_id}): {e2}")
-            # Уведомляем пользователя через callback answer
-            await callback_query.answer("Процесс завершен, но не удалось отобразить результат.", show_alert=True)
+        except Exception as e:
+            logger.error(f"Failed to edit message after '{process_name}' completion (user {user_id}): {e}. Sending new message.")
+            try:
+                await callback_query.message.answer(
+                    final_text,
+                    reply_markup=get_manual_start_keyboard()
+                )
+            except Exception as e2:
+                logger.error(f"Failed to send new message after '{process_name}' completion (user {user_id}): {e2}")
+                try:
+                    await callback_query.answer("Process finished, but failed to display result.", show_alert=True)
+                except Exception:
+                    pass
+
+    logger.info(f"Lock released after handling '{process_name}' for user {user_id}.")

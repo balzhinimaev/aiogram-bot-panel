@@ -1,6 +1,6 @@
 {
-    "process_name": "CurrencyInfo",
-    "timestamp_utc": "2025-04-11T08:05:33.514930+00:00",
+    "process_name": "Sale",
+    "timestamp_utc": "2025-04-18T13:24:38.035053+00:00",
     "success": true,
-    "message": "✅ Процесс успешно завершен.\n\n--- Детали выполнения ---\nParser 'CurrencyInfo': Parser CurrencyInfo started and finished successfully (mock).\nTable process 'set_delivery_region': Table process set_delivery_region finished successfully (mock).\nTable process 'set_shop_price': Table process set_shop_price finished successfully (mock)."
+    "message": "✅ Процесс успешно завершен.\n\n--- Детали выполнения ---\n[200] Parser 'PackageIdSaleInfo': Parser PackageIdSaleInfo started and finished successfully (mock).\n[200] Parser 'BundleIdSaleInfo': Parser BundleIdSaleInfo started and finished successfully (mock).\n[200] Table process 'set_final_price': Table process set_final_price finished successfully (mock).\n[200] Table process 'set_delivery_region': Table process set_delivery_region finished successfully (mock).\n[200] Table process 'set_shop_price': Table process set_shop_price finished successfully (mock)."
 }
